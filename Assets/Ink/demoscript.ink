@@ -23,13 +23,17 @@ Look for "Ink Asset" under Ink Script. It probably says "demoscript" in the box 
 
 === color_settings ===
 
+Select things like the buttons, and look for the color options in the Inspector. I will update this with more detail when I'm more sure what I'm talking about.
 TODO: explain this
 
 -> menu
 
 === UI_tweaks ===
 
-TODO: explain that too
+Buttons! Text box! Um ... 
+
+You can change the font by first dragging your font of choice into the Assets list. Then to change the main story font, expand things in the Hierarchy to find Canvas - Scroll View - Viewport - Content - Text. Click on that Text object; in the Inspector on the right in the "Text (Script)" section there is a Font entry. Drag your font of choice from the Project window onto the Font box (that by default says Roboto-Medium).
+TODO: branch this out for more detail
 
 -> menu
 
