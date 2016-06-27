@@ -69,6 +69,7 @@ public class Main : MonoBehaviour {
 				nextLine = inkScript.Continue ();
 				maintext.text = string.Concat (maintext.text, System.Environment.NewLine);
 				lineCount++;
+
 			} else {
 				// check for choices?
 				int numChoices = inkScript.choiceCount();
