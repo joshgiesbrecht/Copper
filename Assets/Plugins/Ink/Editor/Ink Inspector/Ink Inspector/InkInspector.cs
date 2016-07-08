@@ -11,19 +11,58 @@ using System.Text.RegularExpressions;
 using Object = UnityEngine.Object;
 
 namespace Ink.UnityIntegration {
-	public class InkInspector : ObjectInspector {
+	public class InkInspector : DefaultAssetInspector {
 
 		private InkFile inkFile;
 		private ReorderableList includesFileList;
 		private ReorderableList errorList;
 		private ReorderableList warningList;
 		private ReorderableList todosList;
+		private string cachedFileContents;
 
 		public override bool IsValid(string assetPath) {
 			if(Path.GetExtension(assetPath) == InkEditorUtils.inkFileExtension) {
 				return true;
 			}
 			return false;
+		}
+
+		public override void OnHeaderGUI () {
+			GUILayout.BeginHorizontal();
+			GUILayout.Space(38f);
+			GUILayout.BeginVertical();
+			GUILayout.Space(19f);
+			GUILayout.BeginHorizontal();
+
+			GUILayoutUtility.GetRect(10f, 10f, 16f, 16f, EditorStyles.layerMaskField);
+			GUILayout.FlexibleSpace();
+
+			EditorGUI.BeginDisabledGroup(inkFile == null);
+			if (GUILayout.Button("Open", EditorStyles.miniButton)) {
+				AssetDatabase.OpenAsset(inkFile.inkAsset, 3);
+				GUIUtility.ExitGUI();
+			}
+			EditorGUI.EndDisabledGroup();
+
+			GUILayout.EndHorizontal();
+			GUILayout.EndVertical();
+			GUILayout.EndHorizontal();
+
+			Rect lastRect = GUILayoutUtility.GetLastRect();
+			Rect rect = new Rect(lastRect.x, lastRect.y, lastRect.width, lastRect.height);
+			Rect iconRect = new Rect(rect.x + 6f, rect.y + 6f, 32f, 32f);
+			GUI.DrawTexture(iconRect, InkBrowserIcons.inkFileIconLarge);
+			Rect childIconRect = new Rect(iconRect.x, iconRect.y, 16f, 16f);
+			if(inkFile == null) {
+				GUI.DrawTexture(childIconRect, InkBrowserIcons.unknownFileIcon, ScaleMode.ScaleToFit);
+			} else if(!inkFile.isMaster) {
+				GUI.DrawTexture(childIconRect, InkBrowserIcons.childIconLarge, ScaleMode.ScaleToFit);
+			}
+
+			Rect titleRect = new Rect(rect.x + 44f, rect.y + 6f, rect.width - 44f - 38f - 4f, 16f);
+			titleRect.yMin -= 2f;
+			titleRect.yMax += 2f;
+			GUI.Label(titleRect, editor.target.name, EditorStyles.largeLabel);
 		}
 
 		public override void OnEnable () {
@@ -40,6 +79,7 @@ namespace Ink.UnityIntegration {
 		}
 
 		void Rebuild () {
+			cachedFileContents = "";
 			string assetPath = AssetDatabase.GetAssetPath(target);
 			inkFile = InkLibrary.GetInkFileWithPath(assetPath);
 			if(inkFile == null) 
@@ -51,6 +91,7 @@ namespace Ink.UnityIntegration {
 			CreateErrorList();
 			CreateWarningList();
 			CreateTodoList();
+			cachedFileContents = inkFile.GetFileContents();
 		}
 
 		void CreateIncludeList () {
@@ -173,15 +214,27 @@ namespace Ink.UnityIntegration {
 			if(inkFile.isMaster) {
 				DrawMasterFileHeader();
 			} else {
-				masterInkFile = InkLibrary.GetInkFileWithFile((DefaultAsset)inkFile.master);
+				masterInkFile = inkFile.masterInkFile;
 				DrawSubFileHeader(masterInkFile);
 			}
 
 			DrawEditAndCompileDates(masterInkFile);
-			if(inkFile.isMaster && !editedAfterLastCompile)
-				DrawCompileButton(masterInkFile);
+			if(masterInkFile.hasCompileErrors) {
+				EditorGUILayout.HelpBox("Last compiled failed", MessageType.Error);
+			} if(masterInkFile.hasErrors) {
+				EditorGUILayout.HelpBox("Last compiled had errors", MessageType.Error);
+			} else if(masterInkFile.hasWarnings) {
+				EditorGUILayout.HelpBox("Last compile had warnings", MessageType.Warning);
+			} else if(masterInkFile.jsonAsset == null) {
+				EditorGUILayout.HelpBox("Ink file has not been compiled", MessageType.Warning);
+			}
+			if(inkFile.requiresCompile && GUILayout.Button("Compile")) {
+				InkCompiler.CompileInk(masterInkFile);
+			}
+			
 			DrawIncludedFiles();
 
+			DrawCompileErrors();
 			DrawErrors();
 			DrawWarnings();
 			DrawTODOList();
@@ -232,22 +285,15 @@ namespace Ink.UnityIntegration {
 			EditorGUILayout.EndHorizontal();
 		}
 
-
-		bool editedAfterLastCompile = false;
 		void DrawEditAndCompileDates (InkFile masterInkFile) {
-			editedAfterLastCompile = false;
 			string editAndCompileDateString = "";
 			DateTime lastEditDate = File.GetLastWriteTime(inkFile.absoluteFilePath);
 			editAndCompileDateString += "Last edit date "+lastEditDate.ToString();
-			if(inkFile.isMaster && inkFile.jsonAsset != null) {
+			if(masterInkFile.jsonAsset != null) {
 				DateTime lastCompileDate = File.GetLastWriteTime(InkEditorUtils.CombinePaths(Application.dataPath, AssetDatabase.GetAssetPath(masterInkFile.jsonAsset).Substring(7)));
 				editAndCompileDateString += "\nLast compile date "+lastCompileDate.ToString();
 				if(lastEditDate > lastCompileDate) {
-					editedAfterLastCompile = true;
 					EditorGUILayout.HelpBox(editAndCompileDateString, MessageType.Warning);
-					if(GUILayout.Button("Recompile")) {
-						InkCompiler.CompileInk(masterInkFile);
-					}
 				} else {
 					EditorGUILayout.HelpBox(editAndCompileDateString, MessageType.None);
 				}
@@ -262,21 +308,23 @@ namespace Ink.UnityIntegration {
 			}
 		}
 
-		void DrawCompileButton (InkFile masterInkFile) {
-			bool drawButton = false;
-			if(masterInkFile.hasErrors) {
-				EditorGUILayout.HelpBox("Last compiled failed", MessageType.Error);
-				drawButton = true;
-			} else if(masterInkFile.hasWarnings) {
-				EditorGUILayout.HelpBox("Last compile had errors", MessageType.Warning);
-				drawButton = true;
-			} else if(masterInkFile.jsonAsset == null) {
-				EditorGUILayout.HelpBox("Ink file has not been compiled", MessageType.Warning);
-				drawButton = true;
+		void DrawCompileErrors () {
+			if(inkFile.compileErrors.Count == 0) 
+				return;
+			EditorGUILayout.BeginVertical(GUI.skin.box);
+			EditorGUILayout.HelpBox("Compiler bug prevented compilation of JSON file. Please help us fix it by reporting this as a bug.", MessageType.Error);
+			EditorGUILayout.BeginHorizontal();
+			if(GUILayout.Button("Report via Github")) {
+				Application.OpenURL("https://github.com/inkle/ink-unity-integration/issues/new");
 			}
-			if(drawButton && GUILayout.Button("Compile")) {
-				InkCompiler.CompileInk(masterInkFile);
+			if(GUILayout.Button("Report via Email")) {
+				Application.OpenURL("mailto:info@inklestudios.com");
 			}
+			EditorGUILayout.EndHorizontal();
+			foreach(string compileError in inkFile.compileErrors) {
+				GUILayout.TextArea(compileError);
+			}
+			EditorGUILayout.EndVertical();
 		}
 
 		void DrawErrors () {
@@ -299,8 +347,8 @@ namespace Ink.UnityIntegration {
 
 		void DrawFileContents () {
 			int maxCharacters = 16000;
-			string trimmedStory = inkFile.fileContents.Substring(0, Mathf.Min(inkFile.fileContents.Length, maxCharacters));
-			if(inkFile.fileContents.Length >= maxCharacters)
+			string trimmedStory = cachedFileContents.Substring(0, Mathf.Min(cachedFileContents.Length, maxCharacters));
+			if(cachedFileContents.Length >= maxCharacters)
 				trimmedStory += "...\n\n<...etc...>";
 			float width = EditorGUIUtility.currentViewWidth-50;
 			float height = EditorStyles.wordWrappedLabel.CalcHeight(new GUIContent(trimmedStory), width);

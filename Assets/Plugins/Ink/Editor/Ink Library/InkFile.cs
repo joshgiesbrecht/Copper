@@ -19,8 +19,7 @@ namespace Ink.UnityIntegration {
 	// Helper class for ink files that maintains INCLUDE connections between ink files
 	[System.Serializable]
 	public sealed class InkFile {
-		private const string includeKey = "INCLUDE ";
-
+		
 		public bool compileAutomatically = false;
 
 		// The full file path
@@ -41,13 +40,6 @@ namespace Ink.UnityIntegration {
 		public string filePath {
 			get {
 				return InkEditorUtils.SanitizePathString(AssetDatabase.GetAssetPath(inkAsset));
-			}
-		}
-
-		// The contents of the .ink file
-		public string fileContents {
-			get {
-				return File.OpenText(absoluteFilePath).ReadToEnd();
 			}
 		}
 
@@ -92,11 +84,44 @@ namespace Ink.UnityIntegration {
 		// We cache the paths of the files to be included for performance, giving us more freedom to refresh the actual includes list without needing to parse all the text.
 		public List<string> includePaths = new List<string>();
 		public List<DefaultAsset> includes = new List<DefaultAsset>();
+		// The InkFiles of the includes of this file
+		public List<InkFile> includesInkFiles {
+			get {
+				List<InkFile> _includesInkFiles = new List<InkFile>();
+				foreach(var child in includes) {
+					if(child == null) {
+						Debug.LogError("Error compiling ink: Ink file include in "+filePath+" is null.");
+						continue;
+					}
+					_includesInkFiles.Add(InkLibrary.GetInkFileWithFile(child));
+				}
+				return _includesInkFiles;
+			}
+		}
+		// The InkFiles in the include hierarchy of this file.
+		public List<InkFile> inkFilesInIncludeHierarchy {
+			get {
+				List<InkFile> _includesInkFiles = new List<InkFile>();
+				foreach(var child in includesInkFiles) {
+					_includesInkFiles.Add(child);
+					_includesInkFiles.AddRange(child.inkFilesInIncludeHierarchy);
+				}
+				return _includesInkFiles;
+			}
+		}
 
 		// The compiled json file. Use this to start a story.
 		public TextAsset jsonAsset;
 
+		// Fatal unhandled errors that should be reported as compiler bugs.
+		public List<string> compileErrors = new List<string>();
+		public bool hasCompileErrors {
+			get {
+				return errors.Count > 0;
+			}
+		}
 
+		// Fatal errors caused by errors in the user's ink script.
 		public List<InkFileLog> errors = new List<InkFileLog>();
 		public bool hasErrors {
 			get {
@@ -118,6 +143,51 @@ namespace Ink.UnityIntegration {
 			}
 		}
 
+
+		public bool requiresCompile {
+			get {
+				InkFile masterInkFileIncludingSelf = isMaster ? this : masterInkFile;
+				if(masterInkFileIncludingSelf.jsonAsset == null) 
+					return true;
+
+				foreach(InkFile inkFile in masterInkFileIncludingSelf.inkFilesInIncludeHierarchy) {
+					if(inkFile.hasCompileErrors) {
+						return true;
+					} else if(inkFile.hasErrors) {
+						return true;
+					} else if(inkFile.hasWarnings) {
+						return true;
+					} else if(inkFile.lastEditDate > lastCompileDate) {
+						return true;
+					}
+				}
+				return false;
+			}
+		}
+
+		/// <summary>
+		/// Gets the last compile date of the story.
+		/// </summary>
+		/// <value>The last compile date of the story.</value>
+		public DateTime lastCompileDate {
+			get {
+				InkFile masterInkFileIncludingSelf = isMaster ? this : masterInkFile;
+				string fullJSONFilePath = InkEditorUtils.CombinePaths(Application.dataPath, AssetDatabase.GetAssetPath(masterInkFileIncludingSelf.jsonAsset).Substring(7));
+				return File.GetLastWriteTime(fullJSONFilePath);
+			}
+		}
+
+		/// <summary>
+		/// Gets the last edit date of the file.
+		/// </summary>
+		/// <value>The last edit date of the file.</value>
+		public DateTime lastEditDate {
+			get {
+				return File.GetLastWriteTime(absoluteFilePath);
+			}
+		}
+
+
 		[System.Serializable]
 		public class InkFileLog {
 			public string content;
@@ -134,8 +204,13 @@ namespace Ink.UnityIntegration {
 			this.inkAsset = inkFile;
 		}
 
+		// The contents of the .ink file
+		public string GetFileContents () {
+			return File.OpenText(absoluteFilePath).ReadToEnd();
+		}
+
 		public void ParseContent () {
-			InkIncludeParser includeParser = new InkIncludeParser(fileContents);
+			InkIncludeParser includeParser = new InkIncludeParser(GetFileContents());
 			includePaths = includeParser.includeFilenames;
 		}
 
@@ -219,7 +294,7 @@ namespace Ink.UnityIntegration {
 	        void FindIncludes(string str)
 	        {
 	            _includeFilenames = new List<string> ();
-	            var includeRegex = new Regex (@"^\s*INCLUDE\s+(.+)$", RegexOptions.Multiline);
+	            var includeRegex = new Regex (@"^\s*INCLUDE\s+([^\r\n]+)\r*$", RegexOptions.Multiline);
 	            MatchCollection matches = includeRegex.Matches(str);
 	            foreach (Match match in matches)
 	            {

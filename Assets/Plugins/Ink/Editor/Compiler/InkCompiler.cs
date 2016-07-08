@@ -36,6 +36,7 @@ namespace Ink.UnityIntegration {
 			public string inkAbsoluteFilePath;
 			public string jsonAbsoluteFilePath;
 			public string output;
+			public string errorOutput;
 			public float startTime;
 
 			public CompilationStackItem () {
@@ -57,7 +58,7 @@ namespace Ink.UnityIntegration {
 				if (EditorApplication.timeSinceStartup-compilingFile.startTime > timeout) {
 					InkLibrary.Instance.compilationStack.RemoveAt(i);
 					EditorUtility.ClearProgressBar();
-					Debug.LogError("Ink Compiler timed out for "+compilingFile.inkAbsoluteFilePath+". Ink file: "+compilingFile);
+					Debug.LogError("Ink Compiler timed out for "+compilingFile.inkAbsoluteFilePath+".\n. Check an ink file exists at this path and try Assets/Recompile Ink, else please report as a bug with the following error log at this address: https://github.com/inkle/ink/issues\nError log:\n"+compilingFile.errorOutput);
 				}
 			}
 			if(InkLibrary.Instance.compilationStack.Count > 0) {
@@ -79,7 +80,8 @@ namespace Ink.UnityIntegration {
 			InkLibrary.Rebuild();
 			List<InkFile> masterInkFiles = InkLibrary.GetMasterInkFiles ();
 			foreach(InkFile masterInkFile in masterInkFiles) {
-				CompileInk(masterInkFile);
+				if(InkLibrary.Instance.compileAutomatically || masterInkFile.compileAutomatically)
+					CompileInk(masterInkFile);
 			}
 		}
 
@@ -124,32 +126,36 @@ namespace Ink.UnityIntegration {
 			process.StartInfo.UseShellExecute = false;
 			process.EnableRaisingEvents = true;
 			process.StartInfo.EnvironmentVariables["inkAbsoluteFilePath"] = inputPath;
-			process.Exited += OnCompileProcessComplete;
 			process.ErrorDataReceived += OnProcessError;
+			process.Exited += OnCompileProcessComplete;
 			process.Start();
-
 		}
 
 		static void OnProcessError (object sender, DataReceivedEventArgs e) {
 			Process process = (Process)sender;
-			Debug.LogError("Fatal Error compiling Ink! Ink failed to process. Please report this as a bug.");
-			InkFile inkFile = InkLibrary.GetInkFileWithAbsolutePath(process.StartInfo.EnvironmentVariables["inkAbsoluteFilePath"]);
-			Debug.LogError(inkFile);
-			CompilationStackItem compilingFile = InkLibrary.GetCompilationStackItem(inkFile);
-			InkLibrary.Instance.compilationStack.Remove(compilingFile);
+			ProcessError(process, e.Data);
 		}
 
 		static void OnCompileProcessComplete(object sender, System.EventArgs e) {
 			Process process = (Process)sender;
-
+			string error = process.StandardError.ReadToEnd();
+			if(error != null) {
+				ProcessError(process, error);
+			} 
 			CompilationStackItem pendingFile = InkLibrary.GetCompilationStackItem(process.StartInfo.EnvironmentVariables["inkAbsoluteFilePath"]);
 			pendingFile.state = CompilationStackItem.State.Importing;
 			pendingFile.output = process.StandardOutput.ReadToEnd();
-
+			
 			if(InkLibrary.FilesInCompilingStackInState(CompilationStackItem.State.Compiling).Count == 0) {
 				// This event runs in another thread, preventing us from calling some UnityEditor functions directly. Instead, we delay till the next inspector update.
 				EditorApplication.delayCall += Delay;
 			}
+		}
+
+		private static void ProcessError (Process process, string error) {
+			string inkFilePath = process.StartInfo.EnvironmentVariables["inkAbsoluteFilePath"];
+			CompilationStackItem compilingFile = InkLibrary.GetCompilationStackItem(inkFilePath);
+			compilingFile.errorOutput = error;
 		}
 
 		private static void Delay () {
@@ -157,25 +163,58 @@ namespace Ink.UnityIntegration {
 				Debug.LogWarning("Delayed, but a file is now compiling! You can ignore this warning.");
 				return;
 			}
+			bool errorsFound = false;
+			string listOfFiles = "\nFiles compiled:";
 			foreach (var compilingFile in InkLibrary.Instance.compilationStack) {
-				SetOutputLog(compilingFile);
-				if(!compilingFile.inkFile.hasErrors) {
-					string localJSONAssetPath = compilingFile.jsonAbsoluteFilePath.Substring (Application.dataPath.Length - 6);
-					AssetDatabase.ImportAsset (localJSONAssetPath);
-					compilingFile.inkFile.jsonAsset = AssetDatabase.LoadAssetAtPath<TextAsset> (localJSONAssetPath);
+				listOfFiles += "\n";
+				listOfFiles += compilingFile.inkFile.filePath;
+				if(compilingFile.errorOutput != "") {
+					listOfFiles += " (With unhandled error)";
+					Debug.LogError("Unhandled error occurred compiling Ink file "+compilingFile.inkFile+"! Please report following error as a bug:\n"+compilingFile.errorOutput);
+					compilingFile.inkFile.compileErrors.Clear();
+					compilingFile.inkFile.compileErrors.Add(compilingFile.errorOutput);
+					errorsFound = true;
+				} else {
+					SetOutputLog(compilingFile);
+					bool errorsInEntireStory = false;
+					bool warningsInEntireStory = false;
+					foreach(var inkFile in compilingFile.inkFile.inkFilesInIncludeHierarchy) {
+						if(inkFile.hasErrors) {
+							errorsInEntireStory = true;
+						}
+						if(inkFile.hasWarnings) {
+							warningsInEntireStory = true;
+						}
+					}
+					if(errorsInEntireStory) {
+						listOfFiles += " (With error)";
+						errorsFound = true;
+					} else {
+						string localJSONAssetPath = compilingFile.jsonAbsoluteFilePath.Substring (Application.dataPath.Length - 6);
+						AssetDatabase.ImportAsset (localJSONAssetPath);
+						compilingFile.inkFile.jsonAsset = AssetDatabase.LoadAssetAtPath<TextAsset> (localJSONAssetPath);
+					}
+					if(warningsInEntireStory) {
+						listOfFiles += " (With warning)";
+					}
 				}
 			}
-//			InkLibrary.Refresh();
-			InkLibrary.Instance.compilationStack.Clear();
 
-			EditorUtility.ClearProgressBar();
-			if(EditorApplication.isPlayingOrWillChangePlaymode) {
-				Debug.LogWarning("Ink just finished recompiling while in play mode. Your runtime story may not be up to date.");
-			}
 			foreach (var compilingFile in InkLibrary.Instance.compilationStack) {
 				if (OnCompileInk != null) {
 					OnCompileInk (compilingFile.inkFile);
 				}
+			}
+
+			if(errorsFound) {
+				Debug.LogWarning("Ink compilation completed with errors at "+DateTime.Now.ToLongTimeString()+listOfFiles);
+			} else {
+				Debug.Log("Ink compilation completed at "+DateTime.Now.ToLongTimeString()+listOfFiles);
+			}
+			InkLibrary.Instance.compilationStack.Clear();
+			EditorUtility.ClearProgressBar();
+			if(EditorApplication.isPlayingOrWillChangePlaymode) {
+				Debug.LogWarning("Ink just finished recompiling while in play mode. Your runtime story may not be up to date.");
 			}
 		}
 
@@ -183,12 +222,9 @@ namespace Ink.UnityIntegration {
 			pendingFile.inkFile.errors.Clear();
 			pendingFile.inkFile.warnings.Clear();
 			pendingFile.inkFile.todos.Clear();
-			foreach(var child in pendingFile.inkFile.includes) {
-				if(child == null) {
-					Debug.LogError("Error compiling ink: Ink file include in "+pendingFile.inkFile.filePath+" is null.");
-					continue;
-				}
-				InkFile childInkFile = InkLibrary.GetInkFileWithFile((DefaultAsset)child);
+			// Todo - switch this to pendingFile.inkFile.includesInkFiles
+			foreach(var childInkFile in pendingFile.inkFile.inkFilesInIncludeHierarchy) {
+				childInkFile.compileErrors.Clear();
 				childInkFile.errors.Clear();
 				childInkFile.warnings.Clear();
 				childInkFile.todos.Clear();
@@ -202,30 +238,30 @@ namespace Ink.UnityIntegration {
 					string filename = null;
 					int lineNo = -1;
 					string message = null;
-
+					
 					var errorTypeCapture = match.Groups["errorType"];
 					if( errorTypeCapture != null ) {
 						errorType = errorTypeCapture.Value;
 					}
-
+					
 					var filenameCapture = match.Groups["filename"];
 					if (filenameCapture != null)
 						filename = filenameCapture.Value;
-
+					
 					var lineNoCapture = match.Groups["lineNo"];
 					if (lineNoCapture != null)
 						lineNo = int.Parse (lineNoCapture.Value);
-
+					
 					var messageCapture = match.Groups["message"];
 					if (messageCapture != null)
 						message = messageCapture.Value.Trim();
 					
-
+					
 					string logFilePath = InkEditorUtils.CombinePaths(Path.GetDirectoryName(pendingFile.inkFile.filePath), filename);
 					InkFile inkFile = InkLibrary.GetInkFileWithPath(logFilePath);
 					if(inkFile == null)
 						inkFile = pendingFile.inkFile;
-
+					
 					string pathAndLineNumberString = "\n"+inkFile.filePath+"("+lineNo+")";
 					if(errorType == "ERROR") {
 						inkFile.errors.Add(new InkFile.InkFileLog(message, lineNo));
